@@ -1,7 +1,9 @@
 'use client';
 
 import { FormEvent, useEffect, useMemo, useState } from 'react';
-import { fuelRepository, FuelRecord, sampleRecords } from '../lib/fuel-repository';
+import type { User } from '@supabase/supabase-js';
+import { fuelRepository, FuelRecord } from '../lib/fuel-repository';
+import { signInWithGoogle, supabase } from '../lib/supabase-client';
 
 type View = 'dashboard' | 'history' | 'analytics' | 'report';
 type FormState = Omit<Record<keyof FuelRecord, string>, 'id'> & { id: string };
@@ -33,17 +35,58 @@ function StatCard({ tone, icon, label, value, note }: { tone: string; icon: stri
 }
 
 export default function FuellyApp() {
-  const [records, setRecords] = useState<FuelRecord[]>(sampleRecords);
+  const [records, setRecords] = useState<FuelRecord[]>([]);
+  const [user, setUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [dataLoading, setDataLoading] = useState(false);
+  const [loginError, setLoginError] = useState('');
   const [view, setView] = useState<View>('dashboard');
   const [modalOpen, setModalOpen] = useState(false);
   const [form, setForm] = useState<FormState>(emptyForm);
   const [search, setSearch] = useState('');
   const [stationFilter, setStationFilter] = useState('all');
   const [monthFilter, setMonthFilter] = useState('all');
-  const [reportMonth, setReportMonth] = useState(monthKey(sampleRecords[0].date));
+  const [reportMonth, setReportMonth] = useState(new Date().toISOString().slice(0, 7));
   const [toast, setToast] = useState('');
 
-  useEffect(() => setRecords(fuelRepository.getAll()), []);
+  useEffect(() => {
+    let mounted = true;
+    supabase.auth.getUser().then(({ data }) => {
+      if (mounted) {
+        setUser(data.user ?? null);
+        setAuthLoading(false);
+      }
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (mounted) {
+        setUser(session?.user ?? null);
+        setAuthLoading(false);
+      }
+    });
+    return () => { mounted = false; subscription.unsubscribe(); };
+  }, []);
+
+  useEffect(() => {
+    if (!user) { setRecords([]); return; }
+    let mounted = true;
+    setDataLoading(true);
+    (async () => {
+      try {
+        const imported = await fuelRepository.importLocalRecords(user.id);
+        const next = await fuelRepository.getAll();
+        if (mounted) {
+          setRecords(next);
+          if (imported) setToast(`นำเข้าข้อมูลเดิม ${imported} รายการเรียบร้อยแล้ว`);
+        }
+      } catch {
+        if (mounted) setToast('เชื่อมต่อข้อมูลไม่สำเร็จ กรุณาลองใหม่');
+      } finally {
+        if (mounted) setDataLoading(false);
+      }
+    })();
+    return () => { mounted = false; };
+  }, [user]);
+
   useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(''), 2600);
@@ -52,6 +95,9 @@ export default function FuellyApp() {
 
   const sorted = useMemo(() => [...records].sort((a, b) => b.date.localeCompare(a.date) || b.currentOdometer - a.currentOdometer), [records]);
   const months = useMemo(() => [...new Set(sorted.map((record) => monthKey(record.date)))], [sorted]);
+  useEffect(() => {
+    if (months.length && !months.includes(reportMonth)) setReportMonth(months[0]);
+  }, [months, reportMonth]);
   const latestMonth = months[0] ?? new Date().toISOString().slice(0, 7);
   const currentRecords = sorted.filter((record) => monthKey(record.date) === latestMonth);
   const totalCost = sum(currentRecords.map((record) => record.total));
@@ -82,11 +128,6 @@ export default function FuellyApp() {
   const reportLiters = sum(reportRecords.map((record) => record.liters));
   const reportEfficiency = reportLiters ? reportDistance / reportLiters : 0;
 
-  const updateRecords = (next: FuelRecord[]) => {
-    setRecords(next);
-    fuelRepository.saveAll(next);
-  };
-
   const openAdd = () => {
     const latestOdometer = sorted[0]?.currentOdometer ?? 0;
     setForm({ ...emptyForm(), previousOdometer: latestOdometer ? String(latestOdometer) : '' });
@@ -109,10 +150,11 @@ export default function FuellyApp() {
     });
   };
 
-  const submitForm = (event: FormEvent) => {
+  const submitForm = async (event: FormEvent) => {
     event.preventDefault();
+    if (!user) return;
     const nextRecord: FuelRecord = {
-      id: form.id || `fuel-${Date.now()}`, date: form.date, station: form.station.trim(), fuelType: form.fuelType,
+      id: form.id || crypto.randomUUID(), date: form.date, station: form.station.trim(), fuelType: form.fuelType,
       liters: Number(form.liters), pricePerLiter: Number(form.pricePerLiter), total: Number(form.total),
       currentOdometer: Number(form.currentOdometer), previousOdometer: Number(form.previousOdometer), note: form.note.trim(),
     };
@@ -121,18 +163,39 @@ export default function FuellyApp() {
       return;
     }
     const next = form.id ? records.map((record) => record.id === form.id ? nextRecord : record) : [nextRecord, ...records];
-    updateRecords(next);
-    setModalOpen(false);
-    setToast(form.id ? 'แก้ไขรายการเรียบร้อยแล้ว' : 'บันทึกการเติมน้ำมันแล้ว');
+    try {
+      await fuelRepository.save(nextRecord, user.id);
+      setRecords(next);
+      setModalOpen(false);
+      setToast(form.id ? 'แก้ไขและซิงก์เรียบร้อยแล้ว' : 'บันทึกและซิงก์เรียบร้อยแล้ว');
+    } catch {
+      setToast('บันทึกไม่สำเร็จ กรุณาตรวจการเชื่อมต่อ');
+    }
   };
 
-  const removeRecord = (record: FuelRecord) => {
+  const removeRecord = async (record: FuelRecord) => {
     if (!window.confirm(`ลบรายการ ${record.station} วันที่ ${dateLabel(record.date)} ใช่ไหม?`)) return;
-    updateRecords(records.filter((item) => item.id !== record.id));
-    setToast('ลบรายการแล้ว');
+    try {
+      await fuelRepository.remove(record.id);
+      setRecords(records.filter((item) => item.id !== record.id));
+      setToast('ลบรายการและซิงก์แล้ว');
+    } catch {
+      setToast('ลบไม่สำเร็จ กรุณาลองใหม่');
+    }
   };
+
+  const login = async () => {
+    setLoginError('');
+    const { error } = await signInWithGoogle();
+    if (error) setLoginError('ยังเปิด Google Login ไม่สำเร็จ กรุณาลองอีกครั้งภายหลัง');
+  };
+
+  const logout = async () => { await supabase.auth.signOut(); setRecords([]); };
 
   const goTo = (next: View) => { setView(next); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+
+  if (authLoading) return <div className="auth-loading"><span className="brand-mark">F</span><p>กำลังเตรียม Fuelly…</p></div>;
+  if (!user) return <LoginScreen onLogin={login} error={loginError} />;
 
   return (
     <main className="app-shell">
@@ -143,14 +206,14 @@ export default function FuellyApp() {
           <button className="nav-item" onClick={openAdd}><span>＋</span>บันทึกการเติม</button>
         </nav>
         <div className="sidebar-tip"><span className="tip-icon">♡</span><strong>เคล็ดลับวันนี้</strong><p>เช็กลมยางสม่ำเสมอ ช่วยให้รถวิ่งลื่นและประหยัดน้ำมันขึ้น</p></div>
-        <div className="profile"><span className="avatar">ช</span><div><strong>รถของฉัน</strong><small>Honda City • กข 1234</small></div><span>•••</span></div>
+        <div className="profile"><span className="avatar">{(user.email?.[0] ?? 'F').toUpperCase()}</span><div><strong>{user.user_metadata?.full_name ?? 'บัญชีของฉัน'}</strong><small>{user.email}</small></div><button className="logout-button" onClick={logout} aria-label="ออกจากระบบ">↪</button></div>
       </aside>
 
       <section className="content">
         <header className="topbar">
           <button className="mobile-brand" onClick={() => goTo('dashboard')}><span className="brand-mark">F</span><b>Fuelly</b></button>
           <div><p className="eyebrow">พื้นที่บันทึกของรถคันโปรด</p><h1>{view === 'dashboard' ? 'สวัสดี! พร้อมออกเดินทางไหม 👋' : views.find((item) => item.id === view)?.label}</h1></div>
-          <div className="top-actions"><span className="storage-pill">● เก็บบนอุปกรณ์นี้</span><button className="add-button" onClick={openAdd}><span>＋</span> บันทึกการเติม</button></div>
+          <div className="top-actions"><span className="storage-pill">● ซิงก์กับ Supabase แล้ว</span><button className="add-button" onClick={openAdd}><span>＋</span> บันทึกการเติม</button></div>
         </header>
 
         {view === 'dashboard' && <>
@@ -166,9 +229,9 @@ export default function FuellyApp() {
               <div className="chart-area"><div className="chart-summary"><strong>{baht(sum(monthStats.map((item) => item.cost)))}</strong><span>รวม {monthStats.length} เดือน</span></div><div className="bars">{monthStats.map((item, index) => <div className="bar-wrap" key={item.key}><span className="bar-value">{baht(item.cost)}</span><div className={`bar ${index === monthStats.length - 1 ? 'current' : ''}`} style={{ height: `${Math.max(12, item.cost / chartMax * 100)}%` }} /><small>{monthLabel(item.key)}</small></div>)}</div></div>
             </article>
             <article className="panel efficiency-card">
-              <div className="panel-head"><div><p className="eyebrow">ประสิทธิภาพล่าสุด</p><h2>การใช้น้ำมัน</h2></div><span className="good-pill">{efficiency(sorted[0] ?? sampleRecords[0]) >= 14 ? 'ดีมาก' : 'ปกติ'}</span></div>
-              <div className="gauge"><div className="gauge-value"><strong>{efficiency(sorted[0] ?? sampleRecords[0]).toFixed(1)}</strong><span>กม./ลิตร</span></div></div>
-              <div className="efficiency-stats"><div><span>ต้นทุนต่อกม.</span><strong>{baht(costPerKm(sorted[0] ?? sampleRecords[0]))}</strong></div><div><span>ระยะทางล่าสุด</span><strong>{numberFormat.format(distance(sorted[0] ?? sampleRecords[0]))} กม.</strong></div></div>
+              <div className="panel-head"><div><p className="eyebrow">ประสิทธิภาพล่าสุด</p><h2>การใช้น้ำมัน</h2></div><span className="good-pill">{sorted[0] && efficiency(sorted[0]) >= 14 ? 'ดีมาก' : 'ปกติ'}</span></div>
+              <div className="gauge"><div className="gauge-value"><strong>{sorted[0] ? efficiency(sorted[0]).toFixed(1) : '0.0'}</strong><span>กม./ลิตร</span></div></div>
+              <div className="efficiency-stats"><div><span>ต้นทุนต่อกม.</span><strong>{sorted[0] ? baht(costPerKm(sorted[0])) : '฿0'}</strong></div><div><span>ระยะทางล่าสุด</span><strong>{sorted[0] ? numberFormat.format(distance(sorted[0])) : '0'} กม.</strong></div></div>
             </article>
           </div>
           <article className="panel recent">
@@ -200,6 +263,8 @@ export default function FuellyApp() {
         </section>}
       </section>
 
+      {dataLoading && <div className="sync-overlay"><span className="sync-spinner" /><p>กำลังซิงก์ประวัติของคุณ…</p></div>}
+
       <nav className="bottom-nav" aria-label="เมนูมือถือ">{views.slice(0, 2).map((item) => <button key={item.id} className={view === item.id ? 'active' : ''} onClick={() => goTo(item.id)}><span>{item.icon}</span>{item.short}</button>)}<button className="mobile-add" onClick={openAdd} aria-label="บันทึกการเติม">＋</button>{views.slice(2).map((item) => <button key={item.id} className={view === item.id ? 'active' : ''} onClick={() => goTo(item.id)}><span>{item.icon}</span>{item.short}</button>)}</nav>
 
       {modalOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setModalOpen(false)}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="form-title"><div className="modal-head"><div><p className="eyebrow">{form.id ? 'แก้ไขข้อมูล' : 'เพิ่มรายการใหม่'}</p><h2 id="form-title">บันทึกการเติมน้ำมัน</h2></div><button className="close-button" onClick={() => setModalOpen(false)} aria-label="ปิด">×</button></div><form onSubmit={submitForm} className="fuel-form">
@@ -218,6 +283,28 @@ export default function FuellyApp() {
       {toast && <div className="toast" role="status">{toast}</div>}
     </main>
   );
+}
+
+function LoginScreen({ onLogin, error }: { onLogin: () => void; error: string }) {
+  return <main className="login-page">
+    <section className="login-copy">
+      <div className="login-brand"><span className="brand-mark">F</span><strong>Fuelly</strong></div>
+      <p className="login-kicker">YOUR FUEL COMPANION</p>
+      <h1>ทุกการเดินทาง<br />เริ่มจากการเข้าใจรถ</h1>
+      <p>บันทึกค่าใช้จ่าย ดูประสิทธิภาพ และเรียกดูประวัติได้ครบทุกอุปกรณ์</p>
+      <div className="login-benefits"><span>✓ ซิงก์อัตโนมัติ</span><span>✓ ข้อมูลเป็นส่วนตัว</span><span>✓ ไม่ต้องจำรหัสผ่าน</span></div>
+    </section>
+    <section className="login-card">
+      <div className="login-orbit"><span>F</span></div>
+      <p className="eyebrow">ยินดีต้อนรับกลับ</p>
+      <h2>เข้าสู่ระบบ Fuelly</h2>
+      <p>ใช้บัญชี Google เพื่อให้ประวัติการเติมน้ำมันตามคุณไปทุกอุปกรณ์</p>
+      <button className="google-button" onClick={onLogin}><span className="google-mark">G</span>ดำเนินการต่อด้วย Google</button>
+      {error && <p className="login-error" role="alert">{error}</p>}
+      <small>เราจะใช้เฉพาะอีเมลและชื่อสำหรับระบุตัวตน ข้อมูลน้ำมันของคุณจะไม่ถูกเปิดเผยต่อผู้ใช้อื่น</small>
+      <a className="privacy-link" href="/privacy">นโยบายความเป็นส่วนตัว</a>
+    </section>
+  </main>;
 }
 
 function RecordList({ records, onEdit, onDelete, empty = 'ยังไม่มีประวัติการเติม' }: { records: FuelRecord[]; onEdit: (record: FuelRecord) => void; onDelete: (record: FuelRecord) => void; empty?: string }) {
