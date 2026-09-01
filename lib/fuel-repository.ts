@@ -77,26 +77,8 @@ export const fuelRepository = {
     if (error) throw error;
   },
 
-  async importLocalRecords(userId: string): Promise<number> {
-    if (typeof window === 'undefined') return 0;
-    const importKey = `fuelly.imported.${userId}`;
-    if (window.localStorage.getItem(importKey)) return 0;
-
-    const stored = window.localStorage.getItem(LOCAL_STORAGE_KEY);
-    let localRecords: FuelRecord[] = [];
-    try {
-      localRecords = stored ? JSON.parse(stored) as FuelRecord[] : [];
-    } catch {
-      localRecords = [];
-    }
-
-    if (localRecords.length) {
-      const rows = localRecords.map((record) => toRow({ ...record, id: crypto.randomUUID() }, userId));
-      const { error } = await supabase.from('fuel_records').insert(rows);
-      if (error) throw error;
-    }
-
-    window.localStorage.setItem(importKey, new Date().toISOString());
-    return localRecords.length;
+  clearLegacyLocalRecords(): void {
+    if (typeof window === 'undefined') return;
+    window.localStorage.removeItem(LOCAL_STORAGE_KEY);
   },
 };

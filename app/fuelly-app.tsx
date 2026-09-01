@@ -72,12 +72,9 @@ export default function FuellyApp() {
     setDataLoading(true);
     (async () => {
       try {
-        const imported = await fuelRepository.importLocalRecords(user.id);
+        fuelRepository.clearLegacyLocalRecords();
         const next = await fuelRepository.getAll();
-        if (mounted) {
-          setRecords(next);
-          if (imported) setToast(`นำเข้าข้อมูลเดิม ${imported} รายการเรียบร้อยแล้ว`);
-        }
+        if (mounted) setRecords(next);
       } catch {
         if (mounted) setToast('เชื่อมต่อข้อมูลไม่สำเร็จ กรุณาลองใหม่');
       } finally {
