@@ -1,4 +1,5 @@
 const EPPO_API = 'https://www.eppo.go.th/wp-json/oil-api/v1/oil-prices';
+const MINISTRY_PAGE = 'https://energy.go.th/th';
 
 const fuels = [
   { id: 'gh95', label: 'แก๊สโซฮอล์ 95', field: 'gh95' },
@@ -48,46 +49,140 @@ function parsePayload(text: string): UnknownRecord {
   return parsed;
 }
 
-export async function GET() {
-  try {
-    const response = await fetch(EPPO_API, {
+function basePrices() {
+  return Object.fromEntries(fuels.map((fuel) => [fuel.id, null])) as Record<string, number | null>;
+}
+
+function fuelIdFromLabel(label: string): string | null {
+  const value = label.toLowerCase().replace(/\s+/g, '');
+  if (value.includes('premiumgasohol95') || value.includes('gasohol95premium')) return 'gs95p';
+  if (value.includes('premiumgasohol99') || value.includes('gasohol99premium')) return 'gs99p';
+  if (value.includes('premiumdiesel') || value.includes('dieselpremium')) return 'pds';
+  if (value.includes('gasohol95')) return 'gh95';
+  if (value.includes('gasohol91')) return 'gh91';
+  if (value === 'e20' || value.includes('gasohole20')) return 'e20';
+  if (value === 'e85' || value.includes('gasohole85')) return 'e85';
+  if (value.includes('gasoline95')) return 'gl95';
+  if (value.includes('dieselb20')) return 'dsb20';
+  if (value.includes('dieselb7') || value === 'diesel') return 'ds';
+  return null;
+}
+
+function cellText(html: string): string {
+  return html
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;|&#160;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+async function fetchEppoPrices() {
+  const response = await fetch(EPPO_API, {
       headers: { Accept: 'application/json' },
       signal: AbortSignal.timeout(10_000),
       cf: { cacheEverything: true, cacheTtl: 300 },
     } as RequestInit);
 
-    if (!response.ok) throw new Error(`EPPO returned ${response.status}`);
+  if (!response.ok) throw new Error(`EPPO returned ${response.status}`);
 
-    const payload = parsePayload(await response.text());
-    const data = payload.data;
-    if (payload.status !== 'success' || !isRecord(data)) throw new Error('EPPO data unavailable');
+  const payload = parsePayload(await response.text());
+  const data = payload.data;
+  if (payload.status !== 'success' || !isRecord(data)) throw new Error('EPPO data unavailable');
 
-    const normalizedStations = stations.map((station) => {
-      const stationData = data[station.sourceKey];
-      const source = isRecord(stationData) ? stationData : {};
-      const date = readText(source, `${station.prefix}_date`);
-      const time = readText(source, `${station.prefix}_time`);
+  const normalizedStations = stations.map((station) => {
+    const stationData = data[station.sourceKey];
+    const source = isRecord(stationData) ? stationData : {};
+    const date = readText(source, `${station.prefix}_date`);
+    const time = readText(source, `${station.prefix}_time`);
 
-      return {
-        id: station.id,
-        name: station.name,
-        color: station.color,
-        effectiveAt: [date, time].filter(Boolean).join('T'),
-        prices: Object.fromEntries(
-          fuels.map((fuel) => [fuel.id, readPrice(source, `${station.prefix}_${fuel.field}`)]),
-        ),
-      };
+    return {
+      id: station.id,
+      name: station.name,
+      color: station.color,
+      effectiveAt: [date, time].filter(Boolean).join('T'),
+      prices: Object.fromEntries(
+        fuels.map((fuel) => [fuel.id, readPrice(source, `${station.prefix}_${fuel.field}`)]),
+      ),
+    };
+  });
+
+  return {
+    source: 'สำนักงานนโยบายและแผนพลังงาน (EPPO)',
+    sourceUrl: 'https://www.eppo.go.th/energy-price/oil-retail-price-today/',
+    lastUpdated: typeof payload.last_updated === 'string' ? payload.last_updated : null,
+    fetchedAt: new Date().toISOString(),
+    fuels: fuels.map(({ id, label }) => ({ id, label })),
+    stations: normalizedStations,
+  };
+}
+
+async function fetchMinistryPrices() {
+  const response = await fetch(MINISTRY_PAGE, {
+    headers: { Accept: 'text/html', 'Accept-Language': 'th-TH,th;q=0.9' },
+    signal: AbortSignal.timeout(10_000),
+    cf: { cacheEverything: true, cacheTtl: 300 },
+  } as RequestInit);
+  if (!response.ok) throw new Error(`Ministry returned ${response.status}`);
+
+  const declaredLength = Number(response.headers.get('content-length') ?? 0);
+  if (declaredLength > 1_500_000) throw new Error('Ministry response too large');
+  const html = await response.text();
+  if (html.length > 1_500_000) throw new Error('Ministry response too large');
+
+  const sectionIndex = html.indexOf('ราคาขายปลีก น้ำมัน');
+  const tableStart = html.indexOf('<table', sectionIndex);
+  const tableEnd = html.indexOf('</table>', tableStart);
+  if (sectionIndex < 0 || tableStart < 0 || tableEnd < 0) throw new Error('Ministry price table unavailable');
+
+  const table = html.slice(tableStart, tableEnd + 8);
+  const body = table.match(/<tbody[^>]*>([\s\S]*?)<\/tbody>/i)?.[1];
+  if (!body) throw new Error('Ministry price rows unavailable');
+
+  const priceMaps = Object.fromEntries(stations.map((station) => [station.id, basePrices()])) as Record<string, Record<string, number | null>>;
+  const rows = body.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) ?? [];
+  for (const row of rows) {
+    const cells = (row.match(/<td[^>]*>[\s\S]*?<\/td>/gi) ?? []).map(cellText);
+    const fuelId = cells[0] ? fuelIdFromLabel(cells[0]) : null;
+    if (!fuelId) continue;
+    stations.forEach((station, index) => {
+      const price = Number(cells[index + 1]);
+      priceMaps[station.id][fuelId] = Number.isFinite(price) && price > 0 ? price : null;
     });
+  }
+
+  if (!stations.some((station) => priceMaps[station.id].gh95 !== null)) throw new Error('Ministry prices unavailable');
+
+  const dateArea = html.slice(sectionIndex, tableStart);
+  const lastUpdated = dateArea.match(/\d{1,2}\s+[ก-๙]+\s+25\d{2}/)?.[0] ?? null;
+  return {
+    source: 'กระทรวงพลังงาน',
+    sourceUrl: MINISTRY_PAGE,
+    lastUpdated,
+    fetchedAt: new Date().toISOString(),
+    fuels: fuels.map(({ id, label }) => ({ id, label })),
+    stations: stations.map((station) => ({
+      id: station.id,
+      name: station.name,
+      color: station.color,
+      effectiveAt: '',
+      prices: priceMaps[station.id],
+    })),
+  };
+}
+
+export async function GET() {
+  try {
+    let result;
+    try {
+      result = await fetchEppoPrices();
+    } catch (error) {
+      console.warn(JSON.stringify({ event: 'eppo_fallback', error: error instanceof Error ? error.message : 'unknown' }));
+      result = await fetchMinistryPrices();
+    }
 
     return Response.json(
-      {
-        source: 'สำนักงานนโยบายและแผนพลังงาน (EPPO)',
-        sourceUrl: 'https://www.eppo.go.th/energy-price/oil-retail-price-today/',
-        lastUpdated: typeof payload.last_updated === 'string' ? payload.last_updated : null,
-        fetchedAt: new Date().toISOString(),
-        fuels: fuels.map(({ id, label }) => ({ id, label })),
-        stations: normalizedStations,
-      },
+      result,
       { headers: { 'Cache-Control': 'public, s-maxage=300, stale-while-revalidate=3600' } },
     );
   } catch (error) {

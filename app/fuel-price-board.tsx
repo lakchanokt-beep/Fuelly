@@ -107,7 +107,7 @@ export default function FuelPriceBoard() {
               <div className="station-price-brand"><span style={{ backgroundColor: `${station.color}18`, color: station.color }}>{station.name.slice(0, 2).toUpperCase()}</span><strong>{station.name}</strong></div>
               {isLowest && <small className="lowest-pill">ราคาต่ำสุด</small>}
               <div className="station-price-value">{price === null ? <span className="no-price">ไม่มีจำหน่าย</span> : <><strong>{priceFormat.format(price)}</strong><span>บาท/ลิตร</span></>}</div>
-              <small>มีผล {updateLabel(station.effectiveAt)}</small>
+              <small>มีผล {station.effectiveAt ? updateLabel(station.effectiveAt) : data.lastUpdated ?? 'ล่าสุด'}</small>
             </section>;
           })}
         </div>
