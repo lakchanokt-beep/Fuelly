@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { supabase } from '@/lib/supabase-client';
 
 type FuelOption = { id: string; label: string };
 type StationPrice = {
@@ -36,28 +37,25 @@ export default function FuelPriceBoard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  const loadPrices = useCallback(async (signal?: AbortSignal) => {
+  const loadPrices = useCallback(async () => {
     try {
-      const response = await fetch('/api/fuel-prices', { signal });
-      const result: unknown = await response.json();
-      if (!response.ok || typeof result !== 'object' || result === null || !('stations' in result)) {
+      const { data: result, error: functionError } = await supabase.functions.invoke('fuel-prices');
+      if (functionError || typeof result !== 'object' || result === null || !('stations' in result)) {
         throw new Error('Fuel price data unavailable');
       }
       setError('');
       setData(result as FuelPriceResponse);
-    } catch (requestError) {
-      if (requestError instanceof DOMException && requestError.name === 'AbortError') return;
+    } catch {
       setError('ยังอัปเดตราคาไม่ได้ ลองใหม่อีกครั้งนะ');
     } finally {
-      if (!signal?.aborted) setLoading(false);
+      setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    const controller = new AbortController();
-    const initialLoad = window.setTimeout(() => void loadPrices(controller.signal), 0);
+    const initialLoad = window.setTimeout(() => void loadPrices(), 0);
     const timer = window.setInterval(() => void loadPrices(), 5 * 60 * 1000);
-    return () => { controller.abort(); window.clearTimeout(initialLoad); window.clearInterval(timer); };
+    return () => { window.clearTimeout(initialLoad); window.clearInterval(timer); };
   }, [loadPrices]);
 
   const sortedStations = useMemo(() => {
