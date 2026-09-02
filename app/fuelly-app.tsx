@@ -1,10 +1,10 @@
 'use client';
 
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import type { User } from '@supabase/supabase-js';
 import { fuelRepository, FuelRecord } from '../lib/fuel-repository';
 import { signInWithGoogle, supabase } from '../lib/supabase-client';
-import { FuelPriceResponse, fuelTypeOptions, getFuelPrices, getStationFuelPrice, stationOptions } from '../lib/fuel-prices';
+import { FuelPriceResponse, fuelTypeOptions, getFuelPrices, getFuelPricesForDate, getStationFuelPrice, stationOptions } from '../lib/fuel-prices';
 import FuelPriceBoard from './fuel-price-board';
 
 type View = 'dashboard' | 'history' | 'analytics' | 'report';
@@ -17,8 +17,12 @@ const views: { id: View; label: string; short: string; icon: string }[] = [
   { id: 'report', label: 'รายงานรายเดือน', short: 'รายงาน', icon: '▤' },
 ];
 
+const bangkokDateKey = () => new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Bangkok', year: 'numeric', month: '2-digit', day: '2-digit',
+}).format(new Date());
+
 const emptyForm = (): FormState => ({
-  id: '', date: new Date().toISOString().slice(0, 10), station: '', fuelType: 'Gasohol 95',
+  id: '', date: bangkokDateKey(), station: '', fuelType: 'Gasohol 95',
   liters: '', pricePerLiter: '', total: '', currentOdometer: '', previousOdometer: '', note: '',
 });
 
@@ -54,6 +58,8 @@ export default function FuellyApp() {
   const [toast, setToast] = useState('');
   const [fuelPriceData, setFuelPriceData] = useState<FuelPriceResponse | null>(null);
   const [fuelPriceLoading, setFuelPriceLoading] = useState(false);
+  const [priceLookupStatus, setPriceLookupStatus] = useState<'idle' | 'live' | 'history' | 'missing' | 'error'>('idle');
+  const priceRequestId = useRef(0);
   const userId = user?.id ?? null;
 
   useEffect(() => {
@@ -158,52 +164,64 @@ export default function FuellyApp() {
   const reportLiters = sum(reportRecords.map((record) => record.liters));
   const measuredReportLiters = sum(reportRecords.filter((record) => distance(record) > 0).map((record) => record.liters));
   const reportEfficiency = measuredReportLiters ? reportDistance / measuredReportLiters : 0;
-  const selectedLivePrice = getStationFuelPrice(fuelPriceData, form.station, form.fuelType);
+  const selectedReferencePrice = getStationFuelPrice(fuelPriceData, form.station, form.fuelType);
 
-  const loadFormFuelPrices = async (applyToNewForm = false) => {
+  const loadFormFuelPrices = async (date: string, applyPrice = false) => {
+    const requestId = ++priceRequestId.current;
+    const isToday = date === bangkokDateKey();
     setFuelPriceLoading(true);
+    setPriceLookupStatus('idle');
+    if (applyPrice) {
+      setForm((current) => current.date === date ? { ...current, pricePerLiter: '', liters: '' } : current);
+    }
     try {
-      const nextData = await getFuelPrices();
+      const nextData = isToday ? await getFuelPrices() : await getFuelPricesForDate(date);
+      if (requestId !== priceRequestId.current) return;
       setFuelPriceData(nextData);
-      if (applyToNewForm) {
+      setPriceLookupStatus(nextData ? (isToday ? 'live' : 'history') : 'missing');
+      if (applyPrice) {
         setForm((current) => {
-          if (current.id) return current;
-          const livePrice = getStationFuelPrice(nextData, current.station, current.fuelType);
-          if (!livePrice) return current;
+          if (current.date !== date) return current;
+          const referencePrice = getStationFuelPrice(nextData, current.station, current.fuelType);
+          if (!referencePrice) return { ...current, pricePerLiter: '', liters: '' };
           return {
             ...current,
-            pricePerLiter: livePrice.toFixed(2),
-            liters: Number(current.total) > 0 ? (Number(current.total) / livePrice).toFixed(2) : current.liters,
+            pricePerLiter: referencePrice.toFixed(2),
+            liters: Number(current.total) > 0 ? (Number(current.total) / referencePrice).toFixed(2) : '',
           };
         });
       }
     } catch {
-      setToast('ยังดึงราคาน้ำมันล่าสุดไม่ได้ สามารถกรอกราคาเองได้');
+      if (requestId !== priceRequestId.current) return;
+      setFuelPriceData(null);
+      setPriceLookupStatus('error');
+      setToast(isToday ? 'ยังดึงราคาน้ำมันล่าสุดไม่ได้ สามารถกรอกราคาเองได้' : 'ค้นหาราคาย้อนหลังไม่สำเร็จ สามารถกรอกจากใบเสร็จได้');
     } finally {
-      setFuelPriceLoading(false);
+      if (requestId === priceRequestId.current) setFuelPriceLoading(false);
     }
   };
 
   const openAdd = () => {
     const latestOdometer = sorted.find((record) => record.currentOdometer !== null)?.currentOdometer ?? null;
-    setForm({ ...emptyForm(), previousOdometer: latestOdometer ? String(latestOdometer) : '' });
+    const nextForm = { ...emptyForm(), previousOdometer: latestOdometer ? String(latestOdometer) : '' };
+    setForm(nextForm);
     setModalOpen(true);
-    void loadFormFuelPrices(true);
+    void loadFormFuelPrices(nextForm.date, true);
   };
 
   const openEdit = (record: FuelRecord) => {
     setForm(Object.fromEntries(Object.entries(record).map(([key, value]) => [key, value === null ? '' : String(value)])) as FormState);
     setModalOpen(true);
-    void loadFormFuelPrices(false);
+    void loadFormFuelPrices(record.date, false);
   };
 
   const setField = (field: keyof FormState, value: string) => {
     setForm((current) => {
       const next = { ...current, [field]: value };
       if (field === 'station' || field === 'fuelType') {
-        const livePrice = getStationFuelPrice(fuelPriceData, next.station, next.fuelType);
-        next.pricePerLiter = livePrice ? livePrice.toFixed(2) : '';
-        if (livePrice && Number(next.total) > 0) next.liters = (Number(next.total) / livePrice).toFixed(2);
+        const referencePrice = getStationFuelPrice(fuelPriceData, next.station, next.fuelType);
+        next.pricePerLiter = referencePrice ? referencePrice.toFixed(2) : '';
+        if (referencePrice && Number(next.total) > 0) next.liters = (Number(next.total) / referencePrice).toFixed(2);
       } else if (field === 'total' && Number(next.pricePerLiter) > 0) {
         next.liters = Number(next.total) > 0 ? (Number(next.total) / Number(next.pricePerLiter)).toFixed(2) : '';
       } else if (field === 'liters' || field === 'pricePerLiter') {
@@ -212,6 +230,11 @@ export default function FuellyApp() {
       }
       return next;
     });
+  };
+
+  const changeFuelDate = (date: string) => {
+    setField('date', date);
+    void loadFormFuelPrices(date, true);
   };
 
   const submitForm = async (event: FormEvent) => {
@@ -335,12 +358,12 @@ export default function FuellyApp() {
       <nav className="bottom-nav" aria-label="เมนูมือถือ">{views.slice(0, 2).map((item) => <button key={item.id} className={view === item.id ? 'active' : ''} onClick={() => goTo(item.id)}><span>{item.icon}</span>{item.short}</button>)}<button className="mobile-add" onClick={openAdd} aria-label="บันทึกการเติม">＋</button>{views.slice(2).map((item) => <button key={item.id} className={view === item.id ? 'active' : ''} onClick={() => goTo(item.id)}><span>{item.icon}</span>{item.short}</button>)}</nav>
 
       {modalOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setModalOpen(false)}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="form-title"><div className="modal-head"><div><p className="eyebrow">{form.id ? 'แก้ไขข้อมูล' : 'เพิ่มรายการใหม่'}</p><h2 id="form-title">บันทึกการเติมน้ำมัน</h2></div><button className="close-button" onClick={() => setModalOpen(false)} aria-label="ปิด">×</button></div><form onSubmit={submitForm} className="fuel-form">
-        <label><span>วันที่เติม</span><input type="date" required value={form.date} onChange={(event) => setField('date', event.target.value)} /></label>
+        <label><span>วันที่เติม</span><input type="date" required max={bangkokDateKey()} value={form.date} onChange={(event) => changeFuelDate(event.target.value)} /></label>
         <label><span>ปั๊มน้ำมัน</span><select required value={form.station} onChange={(event) => setField('station', event.target.value)}><option value="">เลือกปั๊มน้ำมัน</option>{stationOptions.map((station) => <option value={station} key={station}>{station}</option>)}</select></label>
         <label><span>ประเภทน้ำมัน</span><select value={form.fuelType} onChange={(event) => setField('fuelType', event.target.value)}>{fuelTypeOptions.map((fuel) => <option value={fuel.value} key={fuel.id}>{fuel.label}</option>)}</select></label>
         <label><span>ราคารวม (บาท)</span><input type="number" min="0.01" step="0.01" required placeholder="เช่น 500" value={form.total} onChange={(event) => setField('total', event.target.value)} /><small>กรอกยอดที่ชำระ แล้วระบบจะคำนวณลิตรให้</small></label>
-        <label><span>ราคาต่อลิตร (บาท)</span><input type="number" min="0.01" step="0.01" required placeholder={fuelPriceLoading ? 'กำลังดึงราคา…' : '0.00'} value={form.pricePerLiter} readOnly={selectedLivePrice !== null} onChange={(event) => setField('pricePerLiter', event.target.value)} /><small>{selectedLivePrice !== null ? `ราคาล่าสุดจาก ${fuelPriceData?.source}` : fuelPriceLoading ? 'กำลังค้นหาราคาล่าสุด' : 'ไม่มีราคาสำหรับตัวเลือกนี้ สามารถกรอกเองได้'}</small></label>
-        <label><span>ปริมาณ (ลิตร)</span><input type="number" min="0.01" step="0.01" required placeholder="0.00" value={form.liters} readOnly={selectedLivePrice !== null && Number(form.total) > 0} onChange={(event) => setField('liters', event.target.value)} /><small>{selectedLivePrice !== null && Number(form.total) > 0 ? 'คำนวณอัตโนมัติจากยอดรวม ÷ ราคาต่อลิตร' : 'กรอกเองได้เมื่อยังไม่มีราคาหรือยอดรวม'}</small></label>
+        <label><span>ราคาต่อลิตร (บาท)</span><input type="number" min="0.01" step="0.01" required placeholder={fuelPriceLoading ? 'กำลังค้นหาราคา…' : '0.00'} value={form.pricePerLiter} readOnly={selectedReferencePrice !== null} onChange={(event) => setField('pricePerLiter', event.target.value)} /><small>{fuelPriceLoading ? 'กำลังค้นหาราคาตามวันที่เลือก' : selectedReferencePrice !== null && priceLookupStatus === 'history' ? `ราคาที่บันทึกไว้ประจำวันที่ ${dateLabel(form.date)}` : selectedReferencePrice !== null ? `ราคาล่าสุดจาก ${fuelPriceData?.source}` : priceLookupStatus === 'missing' ? 'ยังไม่มีราคาย้อนหลังของวันนี้ กรุณากรอกจากใบเสร็จ' : priceLookupStatus === 'error' ? 'ค้นหาราคาไม่สำเร็จ สามารถกรอกจากใบเสร็จได้' : 'ไม่มีราคาสำหรับตัวเลือกนี้ สามารถกรอกเองได้'}</small></label>
+        <label><span>ปริมาณ (ลิตร)</span><input type="number" min="0.01" step="0.01" required placeholder="0.00" value={form.liters} readOnly={selectedReferencePrice !== null && Number(form.total) > 0} onChange={(event) => setField('liters', event.target.value)} /><small>{selectedReferencePrice !== null && Number(form.total) > 0 ? 'คำนวณอัตโนมัติจากยอดรวม ÷ ราคาต่อลิตร' : 'กรอกเองได้เมื่อยังไม่มีราคาหรือยอดรวม'}</small></label>
         <label><span>เลขไมล์ก่อนหน้า <em>(ไม่บังคับ)</em></span><input type="number" min="0" step="1" value={form.previousOdometer} onChange={(event) => setField('previousOdometer', event.target.value)} /></label>
         <label><span>เลขไมล์ปัจจุบัน <em>(ไม่บังคับ)</em></span><input type="number" min="0" step="1" value={form.currentOdometer} onChange={(event) => setField('currentOdometer', event.target.value)} /><small>กรอกเลขไมล์ทั้งสองช่อง เมื่อต้องการดู กม./ลิตร</small></label>
         <div className="live-calculation"><div><span>ระยะทาง</span><strong>{Math.max(0, Number(form.currentOdometer) - Number(form.previousOdometer)) || '—'} กม.</strong></div><div><span>ประสิทธิภาพ</span><strong>{Number(form.liters) && Number(form.currentOdometer) > Number(form.previousOdometer) ? ((Number(form.currentOdometer)-Number(form.previousOdometer))/Number(form.liters)).toFixed(1) : '—'} กม./ลิตร</strong></div><div><span>ต้นทุน</span><strong>{Number(form.total) && Number(form.currentOdometer) > Number(form.previousOdometer) ? baht(Number(form.total)/(Number(form.currentOdometer)-Number(form.previousOdometer))) : '—'} /กม.</strong></div></div>

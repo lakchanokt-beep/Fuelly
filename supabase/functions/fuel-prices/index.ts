@@ -1,4 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { createClient } from "npm:@supabase/supabase-js@2.112.4";
 
 const EPPO_API = "https://www.eppo.go.th/wp-json/oil-api/v1/oil-prices";
 const MINISTRY_PAGE = "https://energy.go.th/th";
@@ -33,6 +34,7 @@ const stations = [
 ] as const;
 
 type UnknownRecord = Record<string, unknown>;
+type FuelPriceResult = Awaited<ReturnType<typeof fetchEppoPrices>>;
 
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -180,17 +182,65 @@ async function fetchMinistryPrices() {
   };
 }
 
+function bangkokDate(): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Bangkok",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
+async function saveDailySnapshot(result: FuelPriceResult): Promise<void> {
+  const supabaseUrl = Deno.env.get("SUPABASE_URL");
+  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (!supabaseUrl || !serviceRoleKey) throw new Error("Snapshot database configuration unavailable");
+
+  const rows = result.stations.flatMap((station) => fuels.flatMap((fuel) => {
+    const price = station.prices[fuel.id];
+    if (price === null) return [];
+    return [{
+      price_date: bangkokDate(),
+      station_id: station.id,
+      station_name: station.name,
+      fuel_id: fuel.id,
+      fuel_label: fuel.label,
+      price,
+      effective_at: station.effectiveAt,
+      source: result.source,
+      source_url: result.sourceUrl,
+      fetched_at: result.fetchedAt,
+    }];
+  }));
+
+  const database = createClient(supabaseUrl, serviceRoleKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { error } = await database
+    .from("fuel_price_history")
+    .upsert(rows, { onConflict: "price_date,station_id,fuel_id" });
+  if (error) throw error;
+}
+
 Deno.serve(async (request: Request) => {
   if (request.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (request.method !== "POST" && request.method !== "GET") return jsonResponse({ error: "Method not allowed" }, 405);
 
   try {
+    let result: FuelPriceResult;
     try {
-      return jsonResponse(await fetchEppoPrices());
+      result = await fetchEppoPrices();
     } catch (error) {
       console.warn(JSON.stringify({ event: "eppo_fallback", error: error instanceof Error ? error.message : "unknown" }));
-      return jsonResponse(await fetchMinistryPrices());
+      result = await fetchMinistryPrices();
     }
+
+    try {
+      await saveDailySnapshot(result);
+    } catch (error) {
+      console.error(JSON.stringify({ event: "fuel_price_snapshot_failed", error: error instanceof Error ? error.message : "unknown" }));
+    }
+    return jsonResponse(result);
   } catch (error) {
     console.error(JSON.stringify({ event: "fuel_prices_fetch_failed", error: error instanceof Error ? error.message : "unknown" }));
     return jsonResponse({ error: "ยังดึงราคาน้ำมันล่าสุดไม่ได้ กรุณาลองใหม่อีกครั้ง" }, 503);
