@@ -57,12 +57,13 @@ const toRow = (record: FuelRecord, userId: string): FuelRecordRow => ({
 });
 
 export const fuelRepository = {
-  async getAll(): Promise<FuelRecord[]> {
+  async getAll(signal: AbortSignal): Promise<FuelRecord[]> {
     const { data, error } = await supabase
       .from('fuel_records')
       .select('id,user_id,date,station,fuel_type,liters,price_per_liter,total,current_odometer,previous_odometer,note')
       .order('date', { ascending: false })
-      .order('current_odometer', { ascending: false });
+      .order('current_odometer', { ascending: false })
+      .abortSignal(signal);
     if (error) throw error;
     return (data as FuelRecordRow[]).map(fromRow);
   },

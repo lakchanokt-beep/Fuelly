@@ -49,6 +49,7 @@ export default function FuellyApp() {
   const [monthFilter, setMonthFilter] = useState('all');
   const [reportMonth, setReportMonth] = useState(new Date().toISOString().slice(0, 7));
   const [toast, setToast] = useState('');
+  const userId = user?.id ?? null;
 
   useEffect(() => {
     let mounted = true;
@@ -58,32 +59,57 @@ export default function FuellyApp() {
         setAuthLoading(false);
       }
     });
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (mounted) {
-        setUser(session?.user ?? null);
-        setAuthLoading(false);
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (!mounted) return;
+      setAuthLoading(false);
+
+      // Supabase refreshes tokens when a background tab becomes active again.
+      // The account has not changed, so do not trigger another history sync.
+      if (event === 'TOKEN_REFRESHED') return;
+
+      const nextUser = session?.user ?? null;
+      setUser((currentUser) => currentUser?.id === nextUser?.id ? currentUser : nextUser);
+      if (event === 'SIGNED_OUT') {
+        setRecords([]);
+        setDataLoading(false);
       }
     });
     return () => { mounted = false; subscription.unsubscribe(); };
   }, []);
 
   useEffect(() => {
-    if (!user) { setRecords([]); return; }
+    if (!userId) return;
     let mounted = true;
-    setDataLoading(true);
-    (async () => {
-      try {
-        fuelRepository.clearLegacyLocalRecords();
-        const next = await fuelRepository.getAll();
-        if (mounted) setRecords(next);
-      } catch {
-        if (mounted) setToast('เชื่อมต่อข้อมูลไม่สำเร็จ กรุณาลองใหม่');
-      } finally {
-        if (mounted) setDataLoading(false);
-      }
-    })();
-    return () => { mounted = false; };
-  }, [user]);
+    let timedOut = false;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, 12_000);
+    const start = window.setTimeout(() => {
+      setDataLoading(true);
+      void (async () => {
+        try {
+          fuelRepository.clearLegacyLocalRecords();
+          const next = await fuelRepository.getAll(controller.signal);
+          if (mounted) setRecords(next);
+        } catch (error) {
+          if (mounted && (timedOut || !(error instanceof DOMException && error.name === 'AbortError'))) {
+            setToast(timedOut ? 'การซิงก์ใช้เวลานานเกินไป กรุณาลองใหม่' : 'เชื่อมต่อข้อมูลไม่สำเร็จ กรุณาลองใหม่');
+          }
+        } finally {
+          window.clearTimeout(timeout);
+          if (mounted) setDataLoading(false);
+        }
+      })();
+    }, 0);
+    return () => {
+      mounted = false;
+      controller.abort();
+      window.clearTimeout(start);
+      window.clearTimeout(timeout);
+    };
+  }, [userId]);
 
   useEffect(() => {
     if (!toast) return;
@@ -93,9 +119,7 @@ export default function FuellyApp() {
 
   const sorted = useMemo(() => [...records].sort((a, b) => b.date.localeCompare(a.date) || b.currentOdometer - a.currentOdometer), [records]);
   const months = useMemo(() => [...new Set(sorted.map((record) => monthKey(record.date)))], [sorted]);
-  useEffect(() => {
-    if (months.length && !months.includes(reportMonth)) setReportMonth(months[0]);
-  }, [months, reportMonth]);
+  const selectedReportMonth = months.length && !months.includes(reportMonth) ? months[0] : reportMonth;
   const latestMonth = months[0] ?? new Date().toISOString().slice(0, 7);
   const currentRecords = sorted.filter((record) => monthKey(record.date) === latestMonth);
   const totalCost = sum(currentRecords.map((record) => record.total));
@@ -120,7 +144,7 @@ export default function FuellyApp() {
     return matchesSearch && (stationFilter === 'all' || record.station === stationFilter) && (monthFilter === 'all' || monthKey(record.date) === monthFilter);
   }), [sorted, search, stationFilter, monthFilter]);
 
-  const reportRecords = sorted.filter((record) => monthKey(record.date) === reportMonth);
+  const reportRecords = sorted.filter((record) => monthKey(record.date) === selectedReportMonth);
   const reportCost = sum(reportRecords.map((record) => record.total));
   const reportDistance = sum(reportRecords.map(distance));
   const reportLiters = sum(reportRecords.map((record) => record.liters));
@@ -253,9 +277,9 @@ export default function FuellyApp() {
         </section>}
 
         {view === 'report' && <section className="view-section">
-          <div className="report-toolbar"><div><p>สรุปข้อมูลแบบรายเดือน พร้อมรายละเอียดทุกการเติม</p></div><select value={reportMonth} onChange={(event) => setReportMonth(event.target.value)}>{months.map((key) => <option value={key} key={key}>{monthLabel(key, 'long')}</option>)}</select></div>
+          <div className="report-toolbar"><div><p>สรุปข้อมูลแบบรายเดือน พร้อมรายละเอียดทุกการเติม</p></div><select value={selectedReportMonth} onChange={(event) => setReportMonth(event.target.value)}>{months.map((key) => <option value={key} key={key}>{monthLabel(key, 'long')}</option>)}</select></div>
           <article className="report-sheet panel">
-            <div className="report-heading"><div><span className="brand-mark">F</span><div><h2>Fuelly Monthly Report</h2><p>{monthLabel(reportMonth, 'long')} • Honda City กข 1234</p></div></div><button className="outline-button" onClick={() => window.print()}>พิมพ์ / บันทึก PDF</button></div>
+            <div className="report-heading"><div><span className="brand-mark">F</span><div><h2>Fuelly Monthly Report</h2><p>{monthLabel(selectedReportMonth, 'long')} • Honda City กข 1234</p></div></div><button className="outline-button" onClick={() => window.print()}>พิมพ์ / บันทึก PDF</button></div>
             <div className="report-stats"><div><span>ค่าใช้จ่ายรวม</span><strong>{baht(reportCost)}</strong></div><div><span>ระยะทางรวม</span><strong>{numberFormat.format(reportDistance)} กม.</strong></div><div><span>น้ำมันรวม</span><strong>{numberFormat.format(reportLiters)} ลิตร</strong></div><div><span>ประสิทธิภาพ</span><strong>{reportEfficiency.toFixed(1)} กม./ลิตร</strong></div></div>
             <div className="report-table-wrap"><table><thead><tr><th>วันที่</th><th>ปั๊ม / น้ำมัน</th><th>ระยะทาง</th><th>ลิตร</th><th>กม./ลิตร</th><th>ยอดรวม</th></tr></thead><tbody>{reportRecords.map((record) => <tr key={record.id}><td>{dateLabel(record.date)}</td><td><b>{record.station}</b><small>{record.fuelType}</small></td><td>{numberFormat.format(distance(record))} กม.</td><td>{numberFormat.format(record.liters)}</td><td>{efficiency(record).toFixed(1)}</td><td><b>{baht(record.total)}</b></td></tr>)}</tbody></table>{!reportRecords.length && <div className="empty-state">ยังไม่มีข้อมูลในเดือนนี้</div>}</div>
           </article>

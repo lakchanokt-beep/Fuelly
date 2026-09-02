@@ -1,8 +1,10 @@
+import Link from 'next/link';
+
 export default function PrivacyPage() {
   return (
     <main className="privacy-page">
       <article className="privacy-card">
-        <a className="privacy-back" href="/">← กลับไป Fuelly</a>
+        <Link className="privacy-back" href="/">← กลับไป Fuelly</Link>
         <p className="eyebrow">PRIVACY POLICY</p>
         <h1>นโยบายความเป็นส่วนตัว</h1>
         <p className="privacy-updated">อัปเดตล่าสุด: 1 กันยายน 2569</p>
