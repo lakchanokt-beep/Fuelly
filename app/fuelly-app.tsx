@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useMemo, useState } from 'react';
 import type { User } from '@supabase/supabase-js';
 import { fuelRepository, FuelRecord } from '../lib/fuel-repository';
 import { signInWithGoogle, supabase } from '../lib/supabase-client';
+import FuelPriceBoard from './fuel-price-board';
 
 type View = 'dashboard' | 'history' | 'analytics' | 'report';
 type FormState = Omit<Record<keyof FuelRecord, string>, 'id'> & { id: string };
@@ -220,6 +221,7 @@ export default function FuellyApp() {
             <StatCard tone="mint" icon="◒" label="อัตราการใช้น้ำมันเฉลี่ย" value={`${averageEfficiency.toFixed(1)} กม./ลิตร`} note={`ใช้น้ำมัน ${numberFormat.format(totalLiters)} ลิตร`} />
             <StatCard tone="peach" icon="⌁" label="จำนวนครั้งที่เติมทั้งหมด" value={`${records.length} ครั้ง`} note={`ล่าสุด ${sorted[0] ? dateLabel(sorted[0].date) : '—'}`} />
           </div>
+          <FuelPriceBoard />
           <div className="dashboard-grid">
             <article className="panel spending-panel">
               <div className="panel-head"><div><p className="eyebrow">ภาพรวม 6 เดือน</p><h2>ค่าใช้จ่ายน้ำมัน</h2></div><button className="text-button" onClick={() => goTo('analytics')}>ดูการวิเคราะห์ →</button></div>
