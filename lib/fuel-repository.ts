@@ -8,8 +8,8 @@ export type FuelRecord = {
   liters: number;
   pricePerLiter: number;
   total: number;
-  currentOdometer: number;
-  previousOdometer: number;
+  currentOdometer: number | null;
+  previousOdometer: number | null;
   note: string;
 };
 
@@ -22,8 +22,8 @@ type FuelRecordRow = {
   liters: number | string;
   price_per_liter: number | string;
   total: number | string;
-  current_odometer: number;
-  previous_odometer: number;
+  current_odometer: number | null;
+  previous_odometer: number | null;
   note: string;
 };
 

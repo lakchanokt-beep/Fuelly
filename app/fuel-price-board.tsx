@@ -1,24 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { supabase } from '@/lib/supabase-client';
-
-type FuelOption = { id: string; label: string };
-type StationPrice = {
-  id: string;
-  name: string;
-  color: string;
-  effectiveAt: string;
-  prices: Record<string, number | null>;
-};
-type FuelPriceResponse = {
-  source: string;
-  sourceUrl: string;
-  lastUpdated: string | null;
-  fetchedAt: string;
-  fuels: FuelOption[];
-  stations: StationPrice[];
-};
+import { FuelPriceResponse, getFuelPrices } from '@/lib/fuel-prices';
 
 const priceFormat = new Intl.NumberFormat('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
@@ -37,12 +20,9 @@ export default function FuelPriceBoard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  const loadPrices = useCallback(async () => {
+  const loadPrices = useCallback(async (force = false) => {
     try {
-      const { data: result, error: functionError } = await supabase.functions.invoke('fuel-prices');
-      if (functionError || typeof result !== 'object' || result === null || !('stations' in result)) {
-        throw new Error('Fuel price data unavailable');
-      }
+      const result = await getFuelPrices(force);
       setError('');
       setData(result as FuelPriceResponse);
     } catch {
@@ -83,7 +63,7 @@ export default function FuelPriceBoard() {
         </div>
         <div className="fuel-price-actions">
           <span className="price-updated">อัปเดต {updateLabel(sortedStations[0]?.effectiveAt || data?.fetchedAt)}</span>
-          <button className="refresh-price" onClick={() => { setLoading(true); void loadPrices(); }} disabled={loading} aria-label="อัปเดตราคาน้ำมัน">
+          <button className="refresh-price" onClick={() => { setLoading(true); void loadPrices(true); }} disabled={loading} aria-label="อัปเดตราคาน้ำมัน">
             <span className={loading ? 'spinning' : ''}>↻</span> อัปเดต
           </button>
         </div>
